@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 import logging
 from pathlib import Path
@@ -17,22 +18,28 @@ class Model:
         self.used_model = None
 
     def recognize(self, images, text=''):
-        try:
-            result = self._recognize(images, text)
-            self.used_model = self.config.llm_model
-            return result
-        except UserError:
-            if not self.config.backup_model or self.config.backup_model == self.config.llm_model:
-                raise
-            logging.getLogger('receipt_bot').warning('Primary model unavailable; using configured backup model')
-            config = replace(self.config, llm_model=self.config.backup_model,
-                             llm_url=self.config.backup_url or self.config.llm_url,
-                             llm_key=self.config.backup_key or self.config.llm_key,
-                             backup_model='')
-            backup = Model(config)
-            result = backup.recognize(images, text)
-            self.used_model = config.llm_model
-            return result
+        max_retries = 5
+        retry_delay = 10
+        logger = logging.getLogger('receipt_bot')
+        model = self
+        self.used_model = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = model._recognize(images, text)
+                self.used_model = model.config.llm_model
+                return result
+            except UserError:
+                if attempt == max_retries:
+                    raise
+                if model is self and self.config.backup_model and self.config.backup_model != self.config.llm_model:
+                    backup_config = replace(self.config, llm_model=self.config.backup_model,
+                                            llm_url=self.config.backup_url or self.config.llm_url,
+                                            llm_key=self.config.backup_key or self.config.llm_key,
+                                            backup_model='')
+                    model = Model(backup_config, client=self.client)
+                    logger.warning('Primary model unavailable; switching to configured backup model')
+                logger.warning('Model call failed; retry %d/%d in %d seconds', attempt + 1, max_retries, retry_delay)
+                time.sleep(retry_delay)
 
     def _recognize(self, images, text=''):
         content = [{'type': 'text', 'text': '请识别以下票据文件。' + ('\nPDF 提取文字（仅作参考）：\n' + text if text else '')}]
@@ -41,14 +48,10 @@ class Model:
             {'role': 'system', 'content': PROMPT}, {'role': 'user', 'content': content}],
             'stream': False, 'max_tokens': 4096}
         try:
-            with self.client or httpx.Client(timeout=self.config.timeout) as client:
-                for attempt in range(3):
-                    response = client.post(self.config.llm_url + '/chat/completions',
-                        headers={'Authorization': 'Bearer ' + self.config.llm_key}, json=payload)
-                    if response.status_code != 429 and response.status_code < 500:
-                        break
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
+            client_context = nullcontext(self.client) if self.client is not None else httpx.Client(timeout=self.config.timeout)
+            with client_context as client:
+                response = client.post(self.config.llm_url + '/chat/completions',
+                    headers={'Authorization': 'Bearer ' + self.config.llm_key}, json=payload)
             if response.status_code in (401, 403):
                 raise UserError(f'模型接口鉴权失败（HTTP {response.status_code}），请检查 LLM_API_KEY 是否有效并有权使用该模型。')
             if response.status_code != 200:

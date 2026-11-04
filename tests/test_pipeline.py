@@ -11,7 +11,7 @@ from PIL import Image
 import pymupdf
 
 from receipt_bot.config import Config
-from receipt_bot.files import UserError, parse_result, output_name, prepare, process_file
+from receipt_bot.files import UserError, parse_result, output_name, prepare, process_file, receipt_summary
 from receipt_bot.jobs import Store, Worker, attachments
 from receipt_bot.api import LarkAPI, Model
 
@@ -45,8 +45,17 @@ class PipelineTests(unittest.TestCase):
         raw['items'] *= 2
         result = parse_result(json.dumps(raw))
         self.assertEqual(output_name(result, '.pdf'), '2026-11-03_2张票据_736.00_CNY.pdf')
-        raw['items'][1] = {**raw['items'][1], 'currency': 'USD'}
-        self.assertIn('金额待确认', output_name(parse_result(json.dumps(raw)), '.pdf'))
+        raw['items'][1] = {**raw['items'][1], 'date': '2026-11-04'}
+        result = parse_result(json.dumps(raw))
+        self.assertEqual(output_name(result, '.png'), '2026-11-03+2026-11-04_2张票据_736.00_CNY.png')
+        summary = receipt_summary(result)
+        self.assertIn('1. 2026-11-03', summary)
+        self.assertIn('2. 2026-11-04', summary)
+        self.assertIn('合计 736.00 CNY', summary)
+        raw['items'][1]['currency'] = 'USD'
+        result = parse_result(json.dumps(raw))
+        self.assertIn('多币种合计见回复', output_name(result, '.png'))
+        self.assertIn('合计 368.00 CNY；368.00 USD', receipt_summary(result))
 
     def test_non_receipt_is_rejected(self):
         with self.assertRaises(UserError):
@@ -179,9 +188,33 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len([p for p in parts if p['type'] == 'image_url']), 2)
             self.assertTrue(parts[1]['image_url']['url'].startswith('data:image/jpeg;base64,'))
             return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'content': extraction()}}]})
-        model = Model(self.config, httpx.Client(transport=httpx.MockTransport(respond)))
-        result = parse_result(model.recognize([b'image-one', b'image-two']))
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            result = parse_result(Model(self.config, client).recognize([b'image-one', b'image-two']))
         self.assertEqual(result['items'][0]['amount'], '368.00')
+
+    def test_model_retries_at_ten_second_intervals_and_stops_at_limit(self):
+        for succeeds in (True, False):
+            with self.subTest(succeeds=succeeds):
+                attempts = []
+
+                def respond(request):
+                    attempts.append(request)
+                    if len(attempts) == 1:
+                        raise httpx.ReadTimeout('simulated timeout', request=request)
+                    if succeeds and len(attempts) == 3:
+                        return httpx.Response(200, json={'choices': [{'message': {'content': extraction()}}]})
+                    return httpx.Response(503)
+
+                with httpx.Client(transport=httpx.MockTransport(respond)) as client, patch('receipt_bot.api.time.sleep') as sleep:
+                    model = Model(self.config, client)
+                    if succeeds:
+                        self.assertEqual(model.recognize([b'image']), extraction())
+                    else:
+                        with self.assertRaisesRegex(UserError, 'HTTP 503'):
+                            model.recognize([b'image'])
+                expected_attempts = 3 if succeeds else 6
+                self.assertEqual(len(attempts), expected_attempts)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(10,)] * (expected_attempts - 1))
 
     def test_backup_model_is_used_only_after_primary_failure(self):
         config = replace(self.config, backup_model='backup-vision')
@@ -191,11 +224,12 @@ class PipelineTests(unittest.TestCase):
             if instance.config.llm_model == 'vision':
                 raise UserError('Primary upstream unavailable')
             return extraction()
-        with patch.object(Model, '_recognize', recognize):
+        with patch.object(Model, '_recognize', recognize), patch('receipt_bot.api.time.sleep') as sleep:
             model = Model(config)
             self.assertEqual(parse_result(model.recognize([b'image']))['items'][0]['amount'], '368.00')
             self.assertEqual(model.used_model, 'backup-vision')
         self.assertEqual(models, ['vision', 'backup-vision'])
+        sleep.assert_called_once_with(10)
 
 
 if __name__ == '__main__':

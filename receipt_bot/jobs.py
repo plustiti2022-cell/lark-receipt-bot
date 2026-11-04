@@ -10,7 +10,7 @@ import threading
 import time
 
 from .api import LarkAPI, Model
-from .files import UserError, process_file
+from .files import UserError, process_file, receipt_summary
 
 LOG = logging.getLogger('receipt_bot')
 HELP = '请直接发送票据图片或 PDF。我会识别日期、金额、事项，按新名称返回原文件。\n识别不清的字段会标记“待确认”；一个 PDF 含多张票据时保留整份 PDF。\n处理失败可发送“重试”；请留意结果中的待确认提示。'
@@ -205,9 +205,9 @@ class Worker(threading.Thread):
             LOG.info('Receipt completed: %s (%d invoices)', identity, len(result['items']))
             # File delivery is the required result; a summary failure must not retry the file.
             try:
-                notes = result.get('warnings', [])
-                if notes:
-                    self.api.text(job['message_id'], '已返回重命名文件。请核对：\n' + '\n'.join(notes[:8]), identity + ':summary')
+                summary = receipt_summary(result)
+                if summary:
+                    self.api.text(job['message_id'], summary, identity + ':summary')
             except Exception:
                 LOG.warning('Optional summary delivery failed: %s', identity)
         except Exception as exc:
