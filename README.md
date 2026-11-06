@@ -2,6 +2,29 @@
 
 运行在本机的企业自建应用机器人。用户在 Lark 单聊发送图片或 PDF，程序逐个识别日期、金额、事项、币种，按新文件名将原文件回复到原消息。使用官方 SDK 长连接收事件，HTTP API 上传、回传文件。
 
+## 启动与停止（macOS）
+
+首次安装（Python 3.11）：
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env  # 仅首次创建，已有 .env 时不要覆盖
+chmod 600 .env
+```
+
+在 `.env` 填好 Lark 和模型凭证后运行：
+
+```bash
+./start.sh
+curl http://127.0.0.1:8765/health
+./stop.sh
+```
+
+启动脚本先验证配置与 Lark 鉴权，再通过当前用户的 launchd 在后台运行，关闭终端后继续工作，进程异常退出会自动重启。只有后台线程与 Lark 长连接均正常才报告启动成功。配置修改后先停止再启动。此方式不设置登录自动启动；重启电脑后需再次运行 `./start.sh`，电脑休眠时服务无法接收消息。
+
+查看状态：`.venv/bin/python scripts/service.py status`。日志位于 `logs/bot.log`、`logs/stdout.log` 和 `logs/stderr.log`。
+
 ## 启动与停止（Windows）
 
 需要 Python 3.11。项目已有独立 `.venv` 环境。

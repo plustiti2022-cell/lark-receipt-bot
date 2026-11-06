@@ -1,6 +1,7 @@
 import json
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import time
@@ -42,10 +43,12 @@ class Model:
                 time.sleep(retry_delay)
 
     def _recognize(self, images, text=''):
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        prompt = f'{PROMPT}\n当前日期（香港时间）：{today}。'
         content = [{'type': 'text', 'text': '请识别以下票据文件。' + ('\nPDF 提取文字（仅作参考）：\n' + text if text else '')}]
         content += [{'type': 'image_url', 'image_url': {'url': image_data(data)}} for data in images]
         payload = {'model': self.config.llm_model, 'messages': [
-            {'role': 'system', 'content': PROMPT}, {'role': 'user', 'content': content}],
+            {'role': 'system', 'content': prompt}, {'role': 'user', 'content': content}],
             'stream': False, 'max_tokens': 4096}
         try:
             client_context = nullcontext(self.client) if self.client is not None else httpx.Client(timeout=self.config.timeout)
